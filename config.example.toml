@@ -1,0 +1,13 @@
+# LazyCommit Configuration
+
+# Maximum number of tokens in diff to send to LLM
+# This helps stay within model context limits
+max_diff_tokens = 12500
+
+# Path to custom prompt template
+# If empty, will use the embedded default template
+# prompt_path = "/path/to/your/template.txt"
+
+# Specific model to use with the llm tool
+# If empty, will use the llm tool's default model
+# model_name = "claude-3.7-sonnet"
