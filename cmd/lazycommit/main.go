@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,8 +17,61 @@ import (
 	"github.com/tiktoken-go/tokenizer"
 )
 
+// Config holds the configuration for LazyCommit
+type Config struct {
+	MaxDiffSize int
+	PromptPath  string
+	UserContext string
+	IsGit       bool // true for git, false for jj
+	ModelName   string
+	Verbose     bool // Whether to print verbose logs
+}
+
+// AppConfig holds the configuration loaded from the config file or environment
+type AppConfig struct {
+	MaxDiffTokens int    `toml:"max_diff_tokens"`
+	PromptPath    string `toml:"prompt_path"`
+	ModelName     string `toml:"model_name"`
+}
+
+// DefaultConfig provides default values for the application
+var DefaultConfig = AppConfig{
+	MaxDiffTokens: 12500,
+	PromptPath:    "",
+	ModelName:     "",
+}
+
+// PromptData holds the data for rendering the prompt template
+type PromptData struct {
+	Branch      string
+	UserContext string
+}
+
+// DefaultPromptTemplate is used when no template file is found
+const DefaultPromptTemplate = `You are an expert programmer helping to write concise, informative git commit messages.
+The user will provide you with a git diff, and you will respond with ONLY a commit message.
+
+Here are the characteristics of a good commit message:
+- Start with a short summary line (50-72 characters)
+- Use the imperative mood ("Add feature" not "Added feature")
+- Optionally include a more detailed explanatory paragraph after the summary, separated by a blank line
+- Explain WHAT changed and WHY, but not HOW (that's in the diff)
+- Reference relevant issue numbers if applicable (e.g. "Fixes #123")
+
+Current branch: {{.Branch}}
+User context: {{.UserContext}}
+
+Respond with ONLY the commit message, no additional explanations, introductions, or notes.`
+
+// logInfo prints information messages only if verbose mode is enabled
+func logInfo(config Config, format string, a ...any) {
+	if config.Verbose {
+		fmt.Fprintf(os.Stderr, format+"\n", a...)
+	}
+}
+
 // loadConfig loads configuration from config files and environment variables
-func loadConfig() (AppConfig, error) {
+func loadConfig(verbose bool) (AppConfig, error) {
 	// Start with defaults
 	config := DefaultConfig
 
@@ -46,13 +100,15 @@ func loadConfig() (AppConfig, error) {
 			if _, err := toml.DecodeFile(path, &config); err != nil {
 				return config, fmt.Errorf("error loading config from %s: %v", path, err)
 			}
-			fmt.Fprintf(os.Stderr, "Loaded configuration from %s\n", path)
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Loaded configuration from %s\n", path)
+			}
 			configLoaded = true
 			break
 		}
 	}
 
-	if !configLoaded {
+	if !configLoaded && verbose {
 		fmt.Fprintf(os.Stderr, "No configuration file found, using defaults\n")
 	}
 
@@ -60,70 +116,34 @@ func loadConfig() (AppConfig, error) {
 	if envMaxTokens := os.Getenv("LAZYCOMMIT_MAX_TOKENS"); envMaxTokens != "" {
 		if maxTokens, err := strconv.Atoi(envMaxTokens); err == nil {
 			config.MaxDiffTokens = maxTokens
-			fmt.Fprintf(os.Stderr, "Using max tokens from environment: %d\n", maxTokens)
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Using max tokens from environment: %d\n", maxTokens)
+			}
 		}
 	}
 
 	if envPromptPath := os.Getenv("LAZYCOMMIT_TEMPLATE"); envPromptPath != "" {
 		config.PromptPath = envPromptPath
-		fmt.Fprintf(os.Stderr, "Using template path from environment: %s\n", envPromptPath)
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Using template path from environment: %s\n", envPromptPath)
+		}
 	}
 
 	if envModelName := os.Getenv("LAZYCOMMIT_MODEL"); envModelName != "" {
 		config.ModelName = envModelName
-		fmt.Fprintf(os.Stderr, "Using model from environment: %s\n", envModelName)
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Using model from environment: %s\n", envModelName)
+		}
 	}
 
 	return config, nil
 }
 
-
-// Config holds the configuration for LazyCommit
-type Config struct {
-	MaxDiffSize int
-	PromptPath  string
-	UserContext string
-	IsGit       bool // true for git, false for jj
-	ModelName   string
-}
-
-// AppConfig holds the configuration loaded from the config file or environment
-type AppConfig struct {
-	MaxDiffTokens int    `toml:"max_diff_tokens"`
-	PromptPath    string `toml:"prompt_path"`
-	ModelName     string `toml:"model_name"`
-}
-
-// DefaultConfig provides default values for the application
-var DefaultConfig = AppConfig{
-	MaxDiffTokens: 12500,
-	PromptPath:    "",
-	ModelName:     "",
-}
-
-// PromptData holds the data for rendering the prompt template
-type PromptData struct {
-	Branch      string
-	UserContext string
-}
-
-// DefaultPromptTemplate is used when no template file is found
-const DefaultPromptTemplate = `You are an expert programmer helping to write concise, informative git commit messages. 
-The user will provide you with a git diff, and you will respond with ONLY a commit message.
-
-Here are the characteristics of a good commit message:
-- Start with a short summary line (50-72 characters)
-- Use the imperative mood ("Add feature" not "Added feature")
-- Optionally include a more detailed explanatory paragraph after the summary, separated by a blank line
-- Explain WHAT changed and WHY, but not HOW (that's in the diff)
-- Reference relevant issue numbers if applicable (e.g. "Fixes #123")
-
-Current branch: {{.Branch}}
-User context: {{.UserContext}}
-
-Respond with ONLY the commit message, no additional explanations, introductions, or notes.`
-
 func main() {
+	// Define command line flags
+	verboseFlag := flag.Bool("verbose", false, "Enable verbose output")
+	flag.Parse()
+
 	// Check if llm command is installed
 	if !commandExists("llm") {
 		fmt.Printf("\033[0;31mError: 'llm' command is not installed. Please install it and try again.\033[0m\n")
@@ -138,18 +158,19 @@ func main() {
 		fmt.Printf("\033[0;31mError: Neither Git nor Jujutsu repository detected.\033[0m\n")
 		os.Exit(1)
 	}
-	
+
 	// Prefer Jujutsu if both are available
 	useGit := isGit && !isJJ
 
 	// Get user context from command line arguments
 	userContext := ""
-	if len(os.Args) > 1 {
-		userContext = os.Args[1]
+	args := flag.Args()
+	if len(args) > 0 {
+		userContext = args[0]
 	}
 
 	// Load configuration from file and environment
-	appConfig, err := loadConfig()
+	appConfig, err := loadConfig(*verboseFlag)
 	if err != nil {
 		fmt.Printf("\033[0;31mWarning: Error loading configuration: %v. Using defaults.\033[0m\n", err)
 		appConfig = DefaultConfig
@@ -162,15 +183,12 @@ func main() {
 		UserContext: userContext,
 		IsGit:       useGit,
 		ModelName:   appConfig.ModelName,
+		Verbose:     *verboseFlag,
 	}
 
 	// Generate and display commit message
-	if useGit {
-		fmt.Fprintf(os.Stderr, "Using Git for version control\n")
-	} else {
-		fmt.Fprintf(os.Stderr, "Using Jujutsu for version control\n")
-	}
-	
+	logInfo(config, "Using %s for version control", map[bool]string{true: "Git", false: "Jujutsu"}[useGit])
+
 	err = generateCommitMessage(config)
 	if err != nil {
 		fmt.Printf("\033[0;31mError: %v\033[0m\n", err)
@@ -182,14 +200,14 @@ func main() {
 func generateCommitMessage(config Config) error {
 	// Get the current branch name
 	branch := getBranchName(config.IsGit)
-	
+
 	// Render the prompt template
 	promptData := PromptData{
 		Branch:      branch,
 		UserContext: config.UserContext,
 	}
-	
-	prompt, err := renderPromptTemplate(config.PromptPath, promptData)
+
+	prompt, err := renderPromptTemplate(config, promptData)
 	if err != nil {
 		return fmt.Errorf("failed to render prompt template: %v", err)
 	}
@@ -204,7 +222,7 @@ func generateCommitMessage(config Config) error {
 	truncatedDiff, err := truncateDiff(diff, config.MaxDiffSize)
 	if err != nil {
 		// Fall back to raw diff if tokenization fails
-		fmt.Fprintf(os.Stderr, "Warning: Failed to tokenize diff: %v. Using raw diff.\n", err)
+		logInfo(config, "Warning: Failed to tokenize diff: %v. Using raw diff.", err)
 		truncatedDiff = diff
 	}
 
@@ -213,13 +231,13 @@ func generateCommitMessage(config Config) error {
 	if config.ModelName != "" {
 		// Use specified model if provided
 		llmCmd = exec.Command("llm", "-m", config.ModelName, "-s", prompt)
-		fmt.Fprintf(os.Stderr, "Using model: %s\n", config.ModelName)
+		logInfo(config, "Using model: %s", config.ModelName)
 	} else {
 		// Otherwise let llm use its default model
 		llmCmd = exec.Command("llm", "-s", prompt)
-		fmt.Fprintf(os.Stderr, "Using default llm model\n")
+		logInfo(config, "Using default llm model")
 	}
-	
+
 	llmCmd.Stdin = strings.NewReader(truncatedDiff)
 	llmCmd.Stdout = os.Stdout
 	llmCmd.Stderr = os.Stderr
@@ -262,35 +280,35 @@ func truncateDiff(diff string, maxTokens int) (string, error) {
 }
 
 // renderPromptTemplate renders the prompt template with the given data
-func renderPromptTemplate(templatePath string, data PromptData) (string, error) {
+func renderPromptTemplate(config Config, data PromptData) (string, error) {
 	var tmplContent string
-	
+
 	// Try to read the template file if path is provided
-	if templatePath != "" && fileExists(templatePath) {
-		content, err := os.ReadFile(templatePath)
+	if config.PromptPath != "" && fileExists(config.PromptPath) {
+		content, err := os.ReadFile(config.PromptPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to read template file: %v", err)
 		}
 		tmplContent = string(content)
-		fmt.Fprintf(os.Stderr, "Using template from: %s\n", templatePath)
+		logInfo(config, "Using template from: %s", config.PromptPath)
 	} else {
 		// Use the default template if file doesn't exist or no path provided
 		tmplContent = DefaultPromptTemplate
-		fmt.Fprintf(os.Stderr, "Using default embedded template\n")
+		logInfo(config, "Using default embedded template")
 	}
-	
+
 	// Parse the template
 	tmpl, err := template.New("prompt").Parse(tmplContent)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse template: %v", err)
 	}
-	
+
 	// Execute the template
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("failed to execute template: %v", err)
 	}
-	
+
 	return buf.String(), nil
 }
 
