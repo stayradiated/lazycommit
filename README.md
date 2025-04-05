@@ -29,7 +29,7 @@ git clone https://github.com/stayradiated/lazycommit.git
 cd lazycommit
 
 # Install directly to your GOPATH/bin
-go install ./cmd/lazycommit
+go install
 ```
 
 Make sure `$GOPATH/bin` is in your PATH to access the `lazycommit` command from anywhere.
@@ -99,7 +99,7 @@ For development or testing without installation:
 
 ```bash
 # Build the binary
-go build -o lazycommit ./cmd/lazycommit
+go build -o lazycommit
 
 # Run the local binary
 ./lazycommit
