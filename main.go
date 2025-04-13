@@ -345,8 +345,11 @@ func getDiff(config Config) (string, error) {
 		cmd = exec.Command("git", args...)
 	} else {
 		args := []string{"diff", "--git"}
-		for _, pattern := range excludePatterns {
-			args = append(args, fmt.Sprintf("~%s", pattern))
+		// we need to stitch all the exclude patterns together
+		// into this format: `~(pattern1|pattern2|...)`
+		excludePattern := strings.Join(excludePatterns, "|")
+		if excludePattern != "" {
+			args = append(args, fmt.Sprintf("~(%s)", excludePattern))
 		}
 		cmd = exec.Command("jj", args...)
 	}
