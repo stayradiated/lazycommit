@@ -323,8 +323,8 @@ func getDiff(config Config) (string, error) {
 		"package-lock.json",
 	}
 
-	// Add generated files from .gitattributes if using Git
-	if config.IsGit && fileExists(".gitattributes") {
+	// Add generated files from .gitattributes
+	if fileExists(".gitattributes") {
 		generatedPatterns, err := getGeneratedFilesFromGitattributes()
 		if err != nil {
 			return "", fmt.Errorf("failed to parse .gitattributes: %v", err)
